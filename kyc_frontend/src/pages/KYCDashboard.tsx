@@ -82,9 +82,20 @@ const KYCDashboard = () => {
   const extractKycFlags = (): KYCFlags => {
     let ageVerified = false;
     if (aadhaarUploadResult?.extractedData?.dob) {
-      const dob = new Date(aadhaarUploadResult.extractedData.dob);
-      const age = Math.floor((Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
-      ageVerified = age >= 18;
+      const raw = aadhaarUploadResult.extractedData.dob as string;
+      // Aadhaar DOB can be "DD-MM-YYYY" or "YYYY-MM-DD" or "DD/MM/YYYY"
+      let dob: Date;
+      const ddmmyyyy = raw.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+      if (ddmmyyyy) {
+        // Re-order to YYYY-MM-DD for unambiguous parsing
+        dob = new Date(`${ddmmyyyy[3]}-${ddmmyyyy[2]}-${ddmmyyyy[1]}`);
+      } else {
+        dob = new Date(raw);
+      }
+      if (!isNaN(dob.getTime())) {
+        const age = Math.floor((Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+        ageVerified = age >= 18;
+      }
     }
 
     const govtIdVerified = aadhaarUploadResult?.extractedData?.success === true;

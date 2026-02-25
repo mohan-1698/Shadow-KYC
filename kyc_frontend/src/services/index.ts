@@ -32,6 +32,7 @@ export {
 export {
   initializeStorageServices,
   storeKycDataOnDataHaven,
+  getKycDataFromDataHaven,
   testBucketAndFileUpload,
   uploadFileToDataHaven,
   getBucketInfo,

@@ -295,5 +295,74 @@ export async function downloadFileFromDataHaven(fileKey: string): Promise<Blob> 
   return downloadFile(fileKey);
 }
 
+/**
+ * Fetch stored KYC data for the connected wallet.
+ * Finds the most recently uploaded kyc-data-*.json in the user's private bucket
+ * and returns the parsed contents.
+ */
+export async function getKycDataFromDataHaven(): Promise<KYCDataToStore | null> {
+  console.log('[StorageService] Fetching KYC data from DataHaven...');
+
+  // Ensure services are ready
+  if (!isWalletConnected()) await connectWallet();
+  if (!isPolkadotApiReady()) await initPolkadotApi();
+  if (!isMspConnected()) await connectToMsp();
+  if (!isAuthenticated()) await authenticateUser();
+
+  const walletAddress = getConnectedAddress();
+  if (!walletAddress) throw new Error('Wallet not connected');
+
+  // Derive deterministic bucket ID (bucketName = wallet address)
+  const storageClient = getStorageHubClient();
+  const bucketName = walletAddress.toLowerCase();
+  const bucketId = (await storageClient.deriveBucketId(walletAddress, bucketName)) as string;
+  console.log('[StorageService] Derived bucket ID:', bucketId);
+
+  // List all files in the bucket
+  const fileList = await getBucketFilesFromMSP(bucketId);
+
+  /**
+   * The MSP returns a tree structure:
+   *   { files: [{ name: "/", children: [ { name: "kyc-data-xxx.json", fileKey: "0x...", ... } ] }] }
+   * Flatten all `children` arrays (recursively) to get actual file entries.
+   */
+  const flattenEntries = (entries: any[]): any[] => {
+    const result: any[] = [];
+    for (const entry of entries) {
+      if (entry.children && Array.isArray(entry.children)) {
+        result.push(...flattenEntries(entry.children));
+      } else if (entry.type === 'file' || entry.fileKey) {
+        result.push(entry);
+      }
+    }
+    return result;
+  };
+
+  const rawEntries: any[] = fileList.files ?? (fileList as any).items ?? (Array.isArray(fileList) ? fileList : []);
+  const files = flattenEntries(rawEntries);
+
+  if (files.length === 0) {
+    console.log('[StorageService] No files found in bucket');
+    return null;
+  }
+
+  // Pick the most recently uploaded KYC JSON file
+  const kycFiles = files.filter((f: any) => (f.name as string ?? '').includes('kyc-data'));
+  const target = kycFiles.length > 0 ? kycFiles[kycFiles.length - 1] : files[files.length - 1];
+  const fileKey: string = target.fileKey ?? target.file_key ?? target.key ?? '';
+  console.log('[StorageService] Downloading file key:', fileKey, '| file:', target.name);
+
+  if (!fileKey) {
+    console.error('[StorageService] Could not resolve fileKey from:', target);
+    return null;
+  }
+
+  // Download and parse
+  const blob = await downloadFile(fileKey);
+  const text = await blob.text();
+  const parsed = JSON.parse(text);
+  return parsed as KYCDataToStore;
+}
+
 // Re-export types
 export type { StorageResult, KYCDataToStore };
