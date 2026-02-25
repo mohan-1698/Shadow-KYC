@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { User, Edit, Shield, Loader2, RefreshCw, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { User, Edit, Shield, Loader2, RefreshCw, AlertCircle, CheckCircle2, Share2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { motion } from 'framer-motion';
 import { getKycDataFromDataHaven } from '@/services/storageService';
 import { isWalletConnected, getConnectedAddress, connectWallet } from '@/services/clientService';
+import { ShareVerificationDialog, type ShareableKycData } from '@/components/ShareVerificationDialog';
 import type { KYCDataToStore } from '@/types';
 
 type LoadState = 'idle' | 'loading' | 'loaded' | 'error' | 'no-wallet' | 'empty';
@@ -18,6 +19,7 @@ const Profile = () => {
   const [loadState, setLoadState] = useState<LoadState>('idle');
   const [errorMsg, setErrorMsg] = useState('');
   const [address, setAddress] = useState<string | null>(getConnectedAddress());
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
 
   const fetchKycData = async () => {
     const addr = getConnectedAddress();
@@ -59,6 +61,15 @@ const Profile = () => {
 
   const extracted = kycData?.aadhaarData?.extractedData;
 
+  const shareData: ShareableKycData = {
+    personalData: extracted
+      ? { name: extracted.name, dob: extracted.dob, gender: extracted.gender, state: extracted.state }
+      : undefined,
+    aadhaarImage: kycData?.images?.aadhaarImage,
+    passportImage: kycData?.images?.passportImage,
+    liveImage: kycData?.images?.liveImage,
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
       <div className="container mx-auto px-4 py-8">
@@ -78,6 +89,12 @@ const Profile = () => {
                 <RefreshCw className={`mr-2 h-4 w-4 ${loadState === 'loading' ? 'animate-spin' : ''}`} />
                 Refresh
               </Button>
+              {loadState === 'loaded' && (
+                <Button variant="outline" onClick={() => setShareDialogOpen(true)}>
+                  <Share2 className="mr-2 h-4 w-4" />
+                  Share
+                </Button>
+              )}
               <Button
                 onClick={() => navigate('/kyc')}
                 className="bg-gradient-primary hover:shadow-glow transition-all duration-300"
@@ -273,6 +290,12 @@ const Profile = () => {
           </div>
         </motion.div>
       </div>
+
+      <ShareVerificationDialog
+        open={shareDialogOpen}
+        onClose={() => setShareDialogOpen(false)}
+        data={shareData}
+      />
     </div>
   );
 };

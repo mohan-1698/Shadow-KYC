@@ -11,6 +11,7 @@ import {
   Share2,
   Clock
 } from 'lucide-react';
+import { ShareVerificationDialog, type ShareableKycData } from '@/components/ShareVerificationDialog';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -85,6 +86,7 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
   const [nftMetadata, setNftMetadata] = useState<NFTMetadata | null>(null);
   const [isLoadingNFT, setIsLoadingNFT] = useState(false);
   const [blockchainStatus, setBlockchainStatus] = useState<'pending' | 'confirmed' | 'failed'>('pending');
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
 
   // Update verification status based on completed steps
   useEffect(() => {
@@ -159,19 +161,19 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
     toast.success(`${label} copied to clipboard`);
   };
 
-  const shareVerification = () => {
-    const shareData = {
-      title: 'KYC Verification Complete',
-      text: `I've completed privacy-preserving KYC verification using zero-knowledge proofs!`,
-      url: window.location.href
-    };
-
-    if (navigator.share) {
-      navigator.share(shareData);
-    } else {
-      copyToClipboard(shareData.url, 'Share URL');
-    }
-  };
+  const buildShareData = (): ShareableKycData => ({
+    personalData: aadhaarUploadResult?.extractedData
+      ? {
+          name: aadhaarUploadResult.extractedData.name,
+          dob: aadhaarUploadResult.extractedData.dob,
+          gender: aadhaarUploadResult.extractedData.gender,
+          state: aadhaarUploadResult.extractedData.address?.state ?? aadhaarUploadResult.extractedData.state,
+        }
+      : undefined,
+    aadhaarImage: kycData?.images?.aadhaarImage ?? faceVerificationResult?.aadhaarImage,
+    passportImage: kycData?.images?.passportImage ?? faceVerificationResult?.passportImage,
+    liveImage: kycData?.images?.liveImage ?? faceVerificationResult?.liveImage,
+  });
 
   const downloadVerificationReport = () => {
     const report = {
@@ -420,8 +422,8 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
                 </Button>
                 <Button
                   variant="outline"
-                  onClick={shareVerification}
-                  disabled={verificationStatus.stage !== 'verified'}
+                  onClick={() => setShareDialogOpen(true)}
+                  disabled={verificationStatus.stage === 'pending'}
                 >
                   <Share2 className="h-4 w-4 mr-2" />
                   Share Verification
@@ -542,6 +544,12 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
           )}
         </TabsContent>
       </Tabs>
+
+      <ShareVerificationDialog
+        open={shareDialogOpen}
+        onClose={() => setShareDialogOpen(false)}
+        data={buildShareData()}
+      />
     </div>
   );
 };
