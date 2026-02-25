@@ -1,13 +1,18 @@
 import { buildEddsa } from "circomlibjs";
-import { getField } from "./poseidon.js";
 
-let eddsa;
+let eddsa: any;
+let F: any;
 
 export async function initEddsa() {
   eddsa = await buildEddsa();
+  F = eddsa.F;
 }
 
-export function signCredentialHash(hash, privateKeyHex) {
+export function getField() {
+  return F;
+}
+
+export function signCredentialHash(hash: string, privateKeyHex: string) {
   if (!eddsa) throw new Error("Eddsa not initialized.");
   if (!privateKeyHex) throw new Error("ISSUER_PRIVATE_KEY missing in environment");
 
@@ -18,15 +23,14 @@ export function signCredentialHash(hash, privateKeyHex) {
   }
 
   // Convert hash string back to field element for signPoseidon
-  const F = getField();
   const hashNum = F.e(hash);
-  
+
   const sig = eddsa.signPoseidon(prv, hashNum);
 
   return {
     sigR8x: eddsa.F.toString(sig.R8[0]),
     sigR8y: eddsa.F.toString(sig.R8[1]),
     sigS: sig.S.toString(),
-    pubKey: eddsa.prv2pub(prv).map(x => eddsa.F.toString(x))
+    pubKey: eddsa.prv2pub(prv).map((x: any) => eddsa.F.toString(x)),
   };
 }

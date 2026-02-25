@@ -3,8 +3,9 @@ import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
 
-export async function generateProof(input) {
-  const workDir = path.join(process.cwd(), "zk");
+export async function generateProof(input: any) {
+  // Use server/zk directory (one level up from backend)
+  const workDir = path.join(__dirname, "..", "..", "..", "server", "zk");
 
   try {
     const inputPath = path.join(workDir, "input.json");
@@ -16,7 +17,9 @@ export async function generateProof(input) {
     fs.writeFileSync(inputPath, JSON.stringify(input));
 
     console.log("Generating witness...");
-    execSync(`node generate_witness.js kyc.wasm input.json witness.wtns`, { cwd: workDir });
+    execSync(`node generate_witness.js kyc.wasm input.json witness.wtns`, {
+      cwd: workDir,
+    });
 
     // Read witness buffer and zkey
     const witnessBuffer = fs.readFileSync(witnessPath);
@@ -26,7 +29,10 @@ export async function generateProof(input) {
     console.log("Zkey buffer size:", zkeyBuffer.length);
     console.log("Starting groth16.prove()...");
 
-    const { proof, publicSignals } = await snarkjs.groth16.prove(zkeyBuffer, witnessBuffer);
+    const { proof, publicSignals } = await snarkjs.groth16.prove(
+      zkeyBuffer,
+      witnessBuffer
+    );
 
     console.log("Proof generated successfully");
     console.log("Public signals:", publicSignals);
@@ -35,9 +41,10 @@ export async function generateProof(input) {
     fs.unlinkSync(witnessPath);
 
     return { proof, publicSignals };
-
   } catch (error) {
     console.error("Full proof generation error:", error);
-    throw new Error(`Proof generation failed: ${error.message}`);
+    throw new Error(
+      `Proof generation failed: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
 }
