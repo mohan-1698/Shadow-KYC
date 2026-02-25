@@ -1,167 +1,239 @@
-import { createWalletClient, createPublicClient, custom, http } from "viem";
-import type { WalletClient } from "viem";
-import { sepolia, dataHavenTestnet, NETWORKS } from "./networks";
+/**
+ * clientService.ts - DataHaven StorageHub SDK Client Initialization
+ *
+ * Connects to user's MetaMask wallet and initializes DataHaven clients.
+ * Automatically detects and connects to MetaMask in the background.
+ *
+ * Following official DataHaven SDK documentation:
+ * https://docs.datahaven.xyz/store-and-retrieve-data/use-storagehub-sdk/get-started/
+ */
 
-// ── Module-level state ──────────────────────────────────────────────────
-let connectedAddress: `0x${string}` | null = null;
-let walletClientInstance: WalletClient | null = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let publicClientInstance: any = null;
-let currentNetwork: "sepolia" | "dataHaven" = "sepolia";
+import {
+  createPublicClient,
+  createWalletClient,
+  http,
+  custom,
+  type WalletClient,
+  type Account,
+} from 'viem';
+import { StorageHubClient } from '@storagehub-sdk/core';
+import { ApiPromise, WsProvider, Keyring } from '@polkadot/api';
+import { types } from '@storagehub/types-bundle';
+import { cryptoWaitReady } from '@polkadot/util-crypto';
+import { NETWORK, chain } from './networks';
 
-// ── Helpers ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// MetaMask Wallet Detection & Connection
+// ────────────────────────────────────────────────────────────────────────────
 
-/** Returns the injected EIP-1193 provider (MetaMask, etc.) */
-export function getEthereumProvider(): any {
-  if (typeof window === "undefined" || !(window as any).ethereum) {
-    throw new Error(
-      "No Ethereum wallet found. Please install MetaMask or another Web3 wallet."
-    );
-  }
-  return (window as any).ethereum;
-}
+let connectedAddress: string | null = null;
+let walletClient: WalletClient | null = null;
+let publicClient = createPublicClient({
+  chain,
+  transport: http(NETWORK.rpcUrl),
+});
 
 /**
- * Asks the wallet to switch to a given chain.
- * Falls back to wallet_addEthereumChain when the chain is unknown.
+ * Detect and connect to MetaMask wallet.
+ * Called automatically on app load.
  */
-export async function switchToNetwork(
-  network: "sepolia" | "dataHaven"
-): Promise<void> {
-  const provider = getEthereumProvider();
-  const cfg = NETWORKS[network];
-  const viemChain = network === "sepolia" ? sepolia : dataHavenTestnet;
-  const targetChainHex = `0x${cfg.chainId.toString(16)}`;
+async function initializeEthereumConnection(): Promise<{
+  address: string;
+  walletClient: WalletClient;
+  publicClient: typeof publicClient;
+} | null> {
+  // Check if MetaMask is installed
+  if (!window.ethereum) {
+    console.warn('[CLIENT] MetaMask not detected. Please install MetaMask to use this app.');
+    return null;
+  }
 
   try {
-    await provider.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: targetChainHex }],
-    });
-  } catch (switchError: any) {
-    // 4902 → chain not yet added to the wallet
-    if (switchError.code === 4902) {
-      await provider.request({
-        method: "wallet_addEthereumChain",
-        params: [
-          {
-            chainId: targetChainHex,
-            chainName: viemChain.name,
-            nativeCurrency: viemChain.nativeCurrency,
-            rpcUrls: [cfg.rpcUrl],
-            blockExplorerUrls:
-              network === "sepolia"
-                ? [NETWORKS.sepolia.blockExplorer]
-                : [],
-          },
-        ],
-      });
-    } else {
-      throw switchError;
+    // Request wallet access
+    const accounts = await window.ethereum.request({
+      method: 'eth_requestAccounts',
+    }) as string[];
+
+    if (!accounts || accounts.length === 0) {
+      throw new Error('No wallet accounts available');
     }
-  }
 
-  currentNetwork = network;
+    const userAddress = accounts[0];
+    connectedAddress = userAddress;
 
-  // Re-create clients for the new chain
-  if (connectedAddress) {
-    walletClientInstance = createWalletClient({
-      chain: viemChain,
-      account: connectedAddress,
-      transport: custom(provider),
+    console.log('[CLIENT] Connected to MetaMask wallet:', userAddress);
+
+    // Create wallet client that uses MetaMask provider
+    const wallet: WalletClient = createWalletClient({
+      chain,
+      transport: custom({
+        async request(request) {
+          return window.ethereum!.request(request as any) as Promise<any>;
+        },
+      }),
     });
-    publicClientInstance = createPublicClient({
-      chain: viemChain,
-      transport: http(cfg.rpcUrl),
-    });
+
+    walletClient = wallet;
+
+    return {
+      address: userAddress,
+      walletClient: wallet,
+      publicClient,
+    };
+  } catch (error) {
+    console.error('[CLIENT] Failed to connect MetaMask:', error);
+    return null;
   }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// Initialize StorageHub Client (SDK wrapper for precompiles)
+// ────────────────────────────────────────────────────────────────────────────
 
-/**
- * Opens the wallet popup (e.g. MetaMask), asks the user to connect,
- * ensures the wallet is on **Sepolia** (default for ZK / normal ops),
- * and creates a viem WalletClient.
- */
-export async function connectWallet(): Promise<`0x${string}`> {
-  const provider = getEthereumProvider();
+let storageHubClient: StorageHubClient | null = null;
 
-  const accounts: string[] = await provider.request({
-    method: "eth_requestAccounts",
+async function initializeStorageHubClient() {
+  if (!walletClient) {
+    throw new Error('[CLIENT] Wallet client not initialized. Connect MetaMask first.');
+  }
+
+  storageHubClient = new StorageHubClient({
+    rpcUrl: NETWORK.rpcUrl,
+    chain: chain,
+    walletClient: walletClient,
+    filesystemContractAddress: NETWORK.filesystemContractAddress,
   });
 
-  if (!accounts.length) {
-    throw new Error("No accounts returned from wallet.");
-  }
+  return storageHubClient;
+}
 
-  connectedAddress = accounts[0] as `0x${string}`;
+// ────────────────────────────────────────────────────────────────────────────
+// Initialize Substrate Path (Polkadot.js)
+// ────────────────────────────────────────────────────────────────────────────
 
-  // Default connection is Sepolia
-  await switchToNetwork("sepolia");
+await cryptoWaitReady();
 
+const provider = new WsProvider(NETWORK.wsUrl);
+const polkadotApi: ApiPromise = await ApiPromise.create({
+  provider,
+  typesBundle: types,
+  noInitWarn: true,
+});
+
+// Note: Substrate signer would be the same wallet address derived from Ethereum
+// For now, we'll use the Ethereum address as the Polkadot account
+
+// ────────────────────────────────────────────────────────────────────────────
+// Frontend Wallet Connection Helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Get the currently connected wallet address.
+ * Returns null if wallet not connected.
+ */
+export function getConnectedAddress(): string | null {
   return connectedAddress;
 }
 
-/** Disconnects (clears local state). */
+/**
+ * Connect to MetaMask wallet.
+ * Called automatically or when user clicks "Connect Wallet" button.
+ */
+export async function connectWallet(): Promise<string> {
+  const result = await initializeEthereumConnection();
+  if (!result) {
+    throw new Error('Failed to connect MetaMask wallet');
+  }
+
+  await initializeStorageHubClient();
+  return result.address;
+}
+
+/**
+ * Disconnect wallet (clears cached address).
+ */
 export function disconnectWallet(): void {
   connectedAddress = null;
-  walletClientInstance = null;
-  publicClientInstance = null;
-  currentNetwork = "sepolia";
+  walletClient = null;
+  storageHubClient = null;
+  console.log('[CLIENT] Wallet disconnected');
 }
 
-/** Returns the currently connected address (or null). */
-export function getConnectedAddress(): `0x${string}` | null {
-  return connectedAddress;
-}
-
-/** Returns which network the wallet is currently pointed at. */
-export function getCurrentNetwork(): "sepolia" | "dataHaven" {
-  return currentNetwork;
-}
-
-/** Returns the WalletClient; throws if not connected. */
-export function getWalletClient(): WalletClient {
-  if (!walletClientInstance) {
-    throw new Error("Wallet not connected. Call connectWallet() first.");
+/**
+ * Get the active wallet client (uses MetaMask).
+ * Ensures wallet is connected first.
+ */
+export async function getWalletClient(): Promise<WalletClient> {
+  if (!walletClient) {
+    // Auto-connect if not already connected
+    const result = await initializeEthereumConnection();
+    if (!result) {
+      throw new Error('MetaMask not available');
+    }
   }
-  return walletClientInstance;
+  return walletClient!;
 }
 
-/** Returns the PublicClient; throws if not connected. */
+/**
+ * Get or initialize the StorageHub client.
+ */
+export async function getStorageHubClient(): Promise<StorageHubClient> {
+  if (!storageHubClient) {
+    await initializeStorageHubClient();
+  }
+  return storageHubClient!;
+}
+
+/**
+ * Get the public client for reading state.
+ */
 export function getPublicClient() {
-  if (!publicClientInstance) {
-    throw new Error("Public client not ready. Call connectWallet() first.");
-  }
-  return publicClientInstance;
+  return publicClient;
 }
 
-/** Listen for account / chain changes and reset state accordingly. */
-export function registerWalletListeners(
-  onAccountChange?: (accounts: string[]) => void,
-  onChainChange?: (chainId: string) => void
-): void {
+/**
+ * Get the Polkadot API instance.
+ */
+export function getPolkadotApi() {
+  return polkadotApi;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Auto-initialize on app load
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Initialize wallet connection on app startup.
+ * This happens in the background without blocking the app.
+ */
+export async function initializeApp(): Promise<void> {
   try {
-    const provider = getEthereumProvider();
-
-    provider.on("accountsChanged", (accounts: string[]) => {
-      if (accounts.length === 0) {
-        disconnectWallet();
-      } else {
-        connectedAddress = accounts[0] as `0x${string}`;
+    // Try to auto-connect if MetaMask is available
+    if (window.ethereum) {
+      const result = await initializeEthereumConnection();
+      if (result) {
+        console.log('[CLIENT] Auto-connected to MetaMask:', result.address);
+        try {
+          // Also initialize StorageHub if wallet is connected
+          await initializeStorageHubClient();
+        } catch (err) {
+          console.warn('[CLIENT] StorageHub client init deferred:', err);
+        }
       }
-      onAccountChange?.(accounts);
-    });
-
-    provider.on("chainChanged", (chainId: string) => {
-      // Update currentNetwork tracker
-      const numericId = parseInt(chainId, 16);
-      if (numericId === NETWORKS.sepolia.chainId) currentNetwork = "sepolia";
-      else if (numericId === NETWORKS.dataHaven.chainId) currentNetwork = "dataHaven";
-      onChainChange?.(chainId);
-    });
-  } catch {
-    // No provider – silently ignore
+    }
+  } catch (error) {
+    // Non-blocking - user can still use the app, just needs to connect wallet
+    console.log('[CLIENT] App initialized (wallet connection optional)');
   }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Exports
+// ────────────────────────────────────────────────────────────────────────────
+
+export {
+  connectedAddress as address,
+  publicClient,
+  polkadotApi,
+  getStorageHubClient as storageHubClient,
+};

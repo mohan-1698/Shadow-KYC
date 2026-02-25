@@ -176,25 +176,52 @@ const KYCDashboard = () => {
       // ── Store extracted data on DataHaven Testnet ──────────────────
       if (aadhaarUploadResult?.extractedData) {
         setIsStoringData(true);
-        toast.info("Switching to DataHaven Testnet to store your KYC data securely…");
+        toast.info("Preparing secure DataHaven storage… (Please sign any MetaMask prompts)");
         try {
           const extracted = aadhaarUploadResult.extractedData;
+          console.log(
+            "[KYCDashboard] Starting DataHaven storage with extracted data:",
+            { name: extracted.name, dob: extracted.dob, gender: extracted.gender }
+          );
+          
           const storageRes = await storeKycDataOnDataHaven({
             name: extracted.name ?? "",
             dob: extracted.dob ?? "",
             gender: extracted.gender ?? "",
             state: (extracted.address && extracted.address.state) ?? "",
           });
+          
           setStorageResult(storageRes);
+          
           toast.success(
-            `KYC data stored on DataHaven! Bucket: ${storageRes.bucketId}`
+            `✅ KYC data securely stored on DataHaven! BucketID: ${storageRes.bucketId}`,
+            {
+              description: `File: ${storageRes.fileKey} | Authenticated: ${storageRes.authenticated ? "Yes" : "No"}`,
+              duration: 5000,
+            }
           );
-          console.log("[KYCDashboard] DataHaven storage result:", storageRes);
+          
+          console.log("[KYCDashboard] DataHaven storage completed:", {
+            bucketId: storageRes.bucketId,
+            fileKey: storageRes.fileKey,
+            authenticated: storageRes.authenticated,
+            timestamp: storageRes.timestamp,
+          });
         } catch (storageErr: any) {
-          console.warn("[KYCDashboard] DataHaven storage failed (non-blocking):", storageErr);
-          toast.warning?.(
-            `DataHaven storage skipped: ${storageErr?.message ?? "MSP unavailable"}`
-          ) ?? toast.error(`DataHaven storage skipped: ${storageErr?.message ?? "MSP unavailable"}`);
+          const storageErrorMsg = storageErr?.message ?? "Storage operation failed";
+          console.warn(
+            "[KYCDashboard] DataHaven storage failed (non-blocking):",
+            storageErrorMsg
+          );
+          
+          // Non-blocking warning — prove generation completed successfully
+          toast.warning(
+            "⚠️ DataHaven storage temporarily unavailable",
+            {
+              description: storageErrorMsg,
+              duration: 4000,
+            }
+          );
         } finally {
           setIsStoringData(false);
         }

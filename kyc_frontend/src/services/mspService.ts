@@ -1,197 +1,151 @@
-import { getConnectedAddress, getWalletClient } from "./clientService";
-import { NETWORKS } from "./networks";
+/**
+ * mspService.ts - MSP (Main Storage Provider) Client Service
+ *
+ * Establishes connection to DataHaven's Main Storage Provider (MSP) backend
+ * for storage operations like buckets and file management.
+ *
+ * Uses the user's connected MetaMask wallet for SIWE authentication.
+ *
+ * Following official DataHaven SDK documentation:
+ * https://docs.datahaven.xyz/store-and-retrieve-data/use-storagehub-sdk/get-started/#set-up-msp-service
+ */
 
-// ── Types ───────────────────────────────────────────────────────────────
+import {
+  HealthStatus,
+  InfoResponse,
+  MspClient,
+  UserInfo,
+} from '@storagehub-sdk/msp-client';
+import type { HttpClientConfig } from '@storagehub-sdk/core';
+import { getConnectedAddress, getWalletClient } from './clientService';
+import { NETWORK } from './networks';
 
-export interface UserInfo {
-  address: string;
-  displayName?: string;
-  [key: string]: unknown;
-}
+// ────────────────────────────────────────────────────────────────────────────
+// Configuration & Session State
+// ────────────────────────────────────────────────────────────────────────────
 
-export interface HttpClientConfig {
-  baseUrl: string;
-  headers?: Record<string, string>;
-}
+// Configure the HTTP client to point to the MSP backend
+const httpCfg: HttpClientConfig = { baseUrl: NETWORK.mspUrl };
 
-export interface SiweSession {
-  token: string;
-  user: UserInfo;
-}
+// Initialize a session token for authenticated requests (updated after authentication
+// through SIWE)
+let sessionToken: string | undefined = undefined;
 
-// ── Module-level state ──────────────────────────────────────────────────
+// MSP Client instance
+let mspClient: MspClient | null = null;
 
-const SESSION_TOKEN_KEY = "shadowkyc_session_token";
-const USER_PROFILE_KEY = "shadowkyc_user_profile";
-
-let sessionToken: string | null =
-  sessionStorage.getItem(SESSION_TOKEN_KEY) ?? null;
-let authenticatedUserProfile: UserInfo | null = (() => {
-  const raw = sessionStorage.getItem(USER_PROFILE_KEY);
-  return raw ? (JSON.parse(raw) as UserInfo) : null;
-})();
-
-// ── Session provider (attaches auth to every MSP request) ───────────────
+// ────────────────────────────────────────────────────────────────────────────
+// Session Provider
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Returns auth credentials for each request, or undefined if not logged in.
+ * Provide session information to the MSP client whenever available.
+ * Returns a token and user address if authenticated, otherwise undefined.
  */
-export const sessionProvider = async () => {
+const sessionProvider = async () => {
   const address = getConnectedAddress();
   return sessionToken && address
-    ? { token: sessionToken, user: { address } }
+    ? ({ token: sessionToken, user: { address } } as const)
     : undefined;
 };
 
-// ── MSP Connection ──────────────────────────────────────────────────────
-
-let mspBaseUrl: string = NETWORKS.dataHaven.mspUrl;
+// ────────────────────────────────────────────────────────────────────────────
+// MSP Client Initialization
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Helper: make an authenticated request to the MSP.
+ * Initialize the MSP client connection.
+ * Called lazily when first needed.
  */
-async function mspFetch(
-  path: string,
-  options: RequestInit = {}
-): Promise<Response> {
-  const session = await sessionProvider();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(options.headers as Record<string, string>),
-  };
-
-  if (session?.token) {
-    headers["Authorization"] = `Bearer ${session.token}`;
+async function initializeMspClient(): Promise<MspClient> {
+  if (mspClient) {
+    return mspClient;
   }
 
-  return fetch(`${mspBaseUrl}${path}`, {
-    ...options,
-    headers,
-  });
+  mspClient = await MspClient.connect(httpCfg, sessionProvider);
+  console.log('[MSP] Client initialized and connected');
+
+  return mspClient;
 }
 
 /**
- * Connect to the MSP endpoint. This validates that the endpoint is
- * reachable and returns a thin client object.
+ * Get or create the MSP client.
  */
-export async function connectToMsp(): Promise<{ baseUrl: string }> {
-  mspBaseUrl = NETWORKS.dataHaven.mspUrl;
-
-  // Healthcheck – if the MSP exposes a status route
-  try {
-    const res = await fetch(`${mspBaseUrl}/health`, { method: "GET" });
-    if (!res.ok) {
-      console.warn("MSP health-check returned non-OK – proceeding anyway.");
-    }
-  } catch {
-    console.warn("MSP health-check unreachable – proceeding anyway.");
+export async function getMspClient(): Promise<MspClient> {
+  if (!mspClient) {
+    await initializeMspClient();
   }
-
-  return { baseUrl: mspBaseUrl };
+  return mspClient!;
 }
 
-// ── SIWE Authentication ─────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────────────────────
+// MSP Operations
+// ────────────────────────────────────────────────────────────────────────────
 
 /**
- * Sign-In With Ethereum:
- *  1. Request a nonce / challenge from the MSP.
- *  2. Build the EIP-4361 message.
- *  3. Sign it with the user's wallet.
- *  4. Send the signed message back for verification.
- *  5. Store the resulting session token.
+ * Retrieve MSP metadata, including its unique ID and version.
+ * Used to get MSP info for storage operations.
  */
-export async function authenticateUser(): Promise<UserInfo> {
-  const walletClient = getWalletClient();
+export const getMspInfo = async (): Promise<InfoResponse> => {
+  const client = await getMspClient();
+  const mspInfo = await client.info.getInfo();
+  console.log(`[MSP] ID: ${mspInfo.mspId}`);
+  return mspInfo;
+};
+
+/**
+ * Retrieve and log the MSP's current health status.
+ * Useful for checking if the storage provider is operational.
+ */
+export const getMspHealth = async (): Promise<HealthStatus> => {
+  const client = await getMspClient();
+  const mspHealth = await client.info.getHealth();
+  console.log(`[MSP] Health: ${JSON.stringify(mspHealth)}`);
+  return mspHealth;
+};
+
+/**
+ * Authenticate the user via SIWE (Sign-In With Ethereum) using the connected MetaMask wallet.
+ * Once authenticated, stores the returned session token and retrieves the user's profile.
+ */
+export const authenticateUser = async (): Promise<UserInfo> => {
+  console.log('[MSP] Authenticating user with MSP via SIWE...');
+
+  const walletClient = await getWalletClient();
   const address = getConnectedAddress();
 
   if (!address) {
-    throw new Error("Wallet not connected. Call connectWallet() first.");
+    throw new Error('[MSP] Wallet not connected. Please connect MetaMask first.');
   }
 
-  const domain = window.location.hostname;
-  const uri = window.location.origin;
+  // In development, domain and uri can be arbitrary placeholders,
+  // but in production, they must match your actual frontend origin.
+  const domain = window.location.hostname || 'localhost';
+  const uri = window.location.origin || 'http://localhost';
 
-  // 1. Request a SIWE nonce from MSP
-  let nonce: string;
-  try {
-    const nonceRes = await mspFetch("/auth/siwe/nonce", { method: "GET" });
-    const nonceData = await nonceRes.json();
-    nonce = nonceData.nonce;
-  } catch {
-    // If the MSP doesn't support a nonce endpoint, generate a local one
-    nonce = crypto.randomUUID();
-  }
+  const client = await getMspClient();
+  const siweSession = await client.auth.SIWE(walletClient, domain, uri);
+  console.log('[MSP] SIWE Session:', siweSession);
+  sessionToken = (siweSession as { token: string }).token;
 
-  // 2. Build the EIP-4361 SIWE message
-  const issuedAt = new Date().toISOString();
-  const message = [
-    `${domain} wants you to sign in with your Ethereum account:`,
-    address,
-    "",
-    "Sign in to Shadow-KYC on DataHaven Testnet",
-    "",
-    `URI: ${uri}`,
-    `Version: 1`,
-    `Chain ID: ${NETWORKS.dataHaven.chainId}`,
-    `Nonce: ${nonce}`,
-    `Issued At: ${issuedAt}`,
-  ].join("\n");
-
-  // 3. Sign with the wallet
-  const signature = await walletClient.signMessage({
-    account: address,
-    message,
-  });
-
-  // 4. Send signed message to MSP for verification
-  const verifyRes = await mspFetch("/auth/siwe/verify", {
-    method: "POST",
-    body: JSON.stringify({ message, signature }),
-  });
-
-  if (!verifyRes.ok) {
-    throw new Error("SIWE verification failed – MSP rejected the signature.");
-  }
-
-  const siweSession: SiweSession = await verifyRes.json();
-  sessionToken = siweSession.token;
-
-  // 5. Fetch user profile
-  let profile: UserInfo;
-  try {
-    const profileRes = await mspFetch("/auth/profile", { method: "GET" });
-    profile = await profileRes.json();
-  } catch {
-    profile = { address };
-  }
-
-  authenticatedUserProfile = profile;
-
-  // Persist to sessionStorage (survives refresh, cleared on tab close)
-  sessionStorage.setItem(SESSION_TOKEN_KEY, sessionToken);
-  sessionStorage.setItem(USER_PROFILE_KEY, JSON.stringify(profile));
-
+  const profile: UserInfo = await client.auth.getProfile();
+  console.log('[MSP] User Profile:', profile);
   return profile;
-}
+};
 
-// ── Getters ─────────────────────────────────────────────────────────────
+/**
+ * Clear the session token (logout).
+ * 
+ * Clears the cached session token so the next operation will require re-authentication.
+ */
+export const clearSession = (): void => {
+  console.log('[MSP] Clearing session token');
+  sessionToken = undefined;
+};
 
-export function getSessionToken(): string | null {
-  return sessionToken;
-}
+// ────────────────────────────────────────────────────────────────────────────
+// Export MSP Client getter for direct access
+// ────────────────────────────────────────────────────────────────────────────
 
-export function getAuthenticatedUser(): UserInfo | null {
-  return authenticatedUserProfile;
-}
-
-export function isAuthenticated(): boolean {
-  return !!sessionToken && !!authenticatedUserProfile;
-}
-
-/** Clear SIWE session (logout). */
-export function clearSession(): void {
-  sessionToken = null;
-  authenticatedUserProfile = null;
-  sessionStorage.removeItem(SESSION_TOKEN_KEY);
-  sessionStorage.removeItem(USER_PROFILE_KEY);
-}
+// For backward compatibility, export a promise that resolves to the client
+export { getMspClient as mspClient };

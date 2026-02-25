@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Home, User, Shield, Lock, Wallet, LogOut, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -21,8 +21,16 @@ const navItems = [
 
 export const Navigation = () => {
   const location = useLocation();
-  const [walletAddress, setWalletAddress] = useState<string | null>(getConnectedAddress());
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+
+  // Check if wallet is already connected on mount (handles auto-connected wallets)
+  useEffect(() => {
+    const address = getConnectedAddress();
+    if (address) {
+      setWalletAddress(address);
+    }
+  }, []);
 
   const handleConnect = async () => {
     setConnecting(true);
