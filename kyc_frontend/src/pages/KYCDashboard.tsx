@@ -13,6 +13,8 @@ import { motion } from "framer-motion";
 import { toast } from "sonner";
 import { generateKycProofOnBackend, type KYCFlags } from "../apis/backendProofService";
 import { parsePublicSignals } from "../utils/zkp";
+import { storeKycDataOnDataHaven, type StorageResult } from "../services/storageService";
+import { getConnectedAddress } from "../services/clientService";
 
 interface KYCData {
   age: string;
@@ -47,6 +49,8 @@ const KYCDashboard = () => {
   const [proofError, setProofError] = useState<string | null>(null);
   const [proofJson, setProofJson] = useState<any>(null);
   const [publicJson, setPublicJson] = useState<any>(null);
+  const [storageResult, setStorageResult] = useState<StorageResult | null>(null);
+  const [isStoringData, setIsStoringData] = useState(false);
 
   const handleKYCSubmit = (data: KYCData) => {
     setKycData(data);
@@ -168,6 +172,33 @@ const KYCDashboard = () => {
       toast.success(
         `🎉 ZK proof generated successfully! Credential Hash: ${credentialHash.toString().substring(0, 10)}...`
       );
+
+      // ── Store extracted data on DataHaven Testnet ──────────────────
+      if (aadhaarUploadResult?.extractedData) {
+        setIsStoringData(true);
+        toast.info("Switching to DataHaven Testnet to store your KYC data securely…");
+        try {
+          const extracted = aadhaarUploadResult.extractedData;
+          const storageRes = await storeKycDataOnDataHaven({
+            name: extracted.name ?? "",
+            dob: extracted.dob ?? "",
+            gender: extracted.gender ?? "",
+            state: (extracted.address && extracted.address.state) ?? "",
+          });
+          setStorageResult(storageRes);
+          toast.success(
+            `KYC data stored on DataHaven! Bucket: ${storageRes.bucketId}`
+          );
+          console.log("[KYCDashboard] DataHaven storage result:", storageRes);
+        } catch (storageErr: any) {
+          console.warn("[KYCDashboard] DataHaven storage failed (non-blocking):", storageErr);
+          toast.warning?.(
+            `DataHaven storage skipped: ${storageErr?.message ?? "MSP unavailable"}`
+          ) ?? toast.error(`DataHaven storage skipped: ${storageErr?.message ?? "MSP unavailable"}`);
+        } finally {
+          setIsStoringData(false);
+        }
+      }
       
       setTimeout(() => {
         setActiveTab("nft");
@@ -320,14 +351,37 @@ const KYCDashboard = () => {
                             </p>
                           </div>
                         )}
+
+                        {isStoringData && (
+                          <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg flex items-center gap-2">
+                            <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                            <p className="text-sm text-blue-700 dark:text-blue-300">
+                              Storing KYC data on DataHaven Testnet…
+                            </p>
+                          </div>
+                        )}
+
+                        {storageResult && (
+                          <div className="p-4 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg space-y-1">
+                            <p className="text-sm font-medium text-purple-700 dark:text-purple-300">
+                              📦 KYC data stored on DataHaven Testnet
+                            </p>
+                            <p className="text-xs text-purple-600 dark:text-purple-400">
+                              Bucket: {storageResult.bucketId}
+                            </p>
+                            <p className="text-xs text-purple-600 dark:text-purple-400">
+                              File: {storageResult.fileKey}
+                            </p>
+                          </div>
+                        )}
                         
                         <Button 
                           onClick={handleGenerateZkProof}
-                          disabled={isGeneratingProof}
+                          disabled={isGeneratingProof || isStoringData}
                           className="w-full bg-gradient-primary hover:shadow-glow transition-all duration-300"
                         >
-                          {isGeneratingProof && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                          {isGeneratingProof ? 'Generating Proof...' : 'Generate ZK Proof'}
+                          {(isGeneratingProof || isStoringData) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                          {isGeneratingProof ? 'Generating Proof...' : isStoringData ? 'Storing on DataHaven...' : 'Generate ZK Proof'}
                         </Button>
                       </CardContent>
                     </Card>
