@@ -183,7 +183,10 @@ export default function ServiceTest() {
         throw new Error('Wallet not connected');
       }
 
-      const bucketId = walletAddress.toLowerCase();
+      // Bucket name is the wallet address; bucket ID is the derived hash
+      const bucketName = walletAddress.toLowerCase();
+      const storageClient = getStorageHubClient();
+      const bucketId = await storageClient.deriveBucketId(walletAddress, bucketName) as string;
       const fileName = `test/test-${Date.now()}.txt`;
       const fileContent = JSON.stringify({
         test: true,
@@ -218,8 +221,11 @@ export default function ServiceTest() {
         throw new Error('Wallet not connected');
       }
 
-      const bucketId = walletAddress.toLowerCase();
-      addLog(`Getting bucket info for: ${bucketId}`, 'info');
+      // Bucket name is the wallet address; bucket ID is the derived hash
+      const bucketName = walletAddress.toLowerCase();
+      const storageClient = getStorageHubClient();
+      const bucketId = await storageClient.deriveBucketId(walletAddress, bucketName) as string;
+      addLog(`Getting bucket info for derived ID: ${bucketId}`, 'info');
       const info = await getBucketInfo(bucketId);
 
       addLog(`✅ Bucket exists: ${info.exists ? 'Yes' : 'No'}`, 'success');

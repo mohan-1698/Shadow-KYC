@@ -158,6 +158,7 @@ export async function waitForBackendFileReady(bucketId: string, fileKey: string)
       const fileInfo = await mspClient.files.getFileInfo(bucketId, fileKey);
 
       if (fileInfo.status === 'ready') {
+        console.log('[FileOps] ✓ File ready in backend');
         return fileInfo;
       } else if (fileInfo.status === 'revoked') {
         throw new Error('File upload was cancelled by user');
@@ -168,10 +169,16 @@ export async function waitForBackendFileReady(bucketId: string, fileKey: string)
       }
 
       // For "pending" status, continue waiting
+      if (i % 6 === 0 && i > 0) {
+        console.debug(`[FileOps] File still pending (${i * delayMs / 1000}s elapsed), waiting...`);
+      }
     } catch (error: unknown) {
       const err = error as { status?: number; body?: { error?: string } };
       if (err?.status === 404 || err?.body?.error === 'Not found: Record') {
-        // File not yet indexed, continue waiting
+        // File not yet indexed, continue waiting (this is expected)
+        if (i % 6 === 0) {
+          console.debug(`[FileOps] File not yet indexed (attempt ${i + 1}/${maxAttempts}), retrying...`);
+        }
       } else {
         throw error;
       }

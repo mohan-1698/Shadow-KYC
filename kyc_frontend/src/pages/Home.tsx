@@ -4,10 +4,10 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { motion, useInView } from 'framer-motion';
-import { ConnectWallet, useAddress } from '@thirdweb-dev/react';
 import { CredentialVerification } from '@/components/CredentialVerification';
-import { useRef } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { ContractVerifier } from '@/components/ContractVerifier';
+import { connectWallet, getConnectedAddress } from '@/services/clientService';
 
 const features = [
   {
@@ -52,7 +52,25 @@ const benefits = [
 
 const Home = () => {
   const navigate = useNavigate();
-  const address = useAddress();
+  const [address, setAddress] = useState<string | null>(getConnectedAddress());
+  const [isConnecting, setIsConnecting] = useState(false);
+
+  // Sync wallet state when component mounts
+  useEffect(() => {
+    setAddress(getConnectedAddress());
+  }, []);
+
+  const handleConnectWallet = async () => {
+    setIsConnecting(true);
+    try {
+      await connectWallet();
+      setAddress(getConnectedAddress());
+    } catch (err) {
+      console.error('[Home] Wallet connect failed:', err);
+    } finally {
+      setIsConnecting(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
@@ -96,12 +114,14 @@ const Home = () => {
                 <div className="flex flex-col items-center gap-6">
                   <p className="text-lg text-muted-foreground">Connect your wallet to unlock the future of identity</p>
                   <div className="flex flex-col sm:flex-row gap-4 items-center">
-                    <ConnectWallet
-                      theme="dark"
-                      btnTitle="🔗 Connect Wallet"
-                      modalTitle="Select Your Wallet"
-                      className="px-8 py-3 text-lg"
-                    />
+                    <Button
+                      onClick={handleConnectWallet}
+                      disabled={isConnecting}
+                      size="lg"
+                      className="bg-gradient-to-r from-primary to-purple-600 hover:shadow-2xl hover:scale-105 transition-all duration-300 px-8 py-3 text-lg"
+                    >
+                      {isConnecting ? '⏳ Connecting...' : '🔗 Connect Wallet'}
+                    </Button>
                     <Button
                       onClick={() => navigate('/kyc')}
                       size="lg"

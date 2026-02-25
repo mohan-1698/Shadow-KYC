@@ -80,13 +80,15 @@ export async function verifyBucketCreation(bucketId: string): Promise<BucketInfo
   // Verify ownership
   const address = getConnectedAddress();
   if (bucketData.userId !== address) {
-    console.warn('Bucket owner mismatch');
+    console.warn('[BucketOps] Bucket owner mismatch', { expected: address, got: bucketData.userId });
   }
 
   // Verify MSP
   if (bucketData.mspId !== mspId) {
-    console.warn('Bucket MSP mismatch');
+    console.warn('[BucketOps] Bucket MSP mismatch', { expected: mspId, got: bucketData.mspId });
   }
+
+  console.log(`[BucketOps] Bucket verified — private: ${bucketData.private}, valuePropId: ${bucketData.valuePropositionId}`);
 
   return bucketData;
 }
@@ -101,12 +103,16 @@ export async function waitForBackendBucketReady(bucketId: string): Promise<void>
     try {
       const bucket = await mspClient.buckets.getBucket(bucketId);
       if (bucket) {
+        console.log('[BucketOps] ✓ Bucket indexed in backend');
         return;
       }
     } catch (error: unknown) {
       const err = error as { status?: number; body?: { error?: string } };
       if (err.status === 404 || err.body?.error === 'Not found: Record') {
-        // Bucket not yet indexed, continue polling
+        // Bucket not yet indexed, continue polling (this is expected)
+        if (i < maxAttempts - 1) {
+          console.debug(`[BucketOps] Bucket not yet indexed (attempt ${i + 1}/${maxAttempts}), retrying...`);
+        }
       } else {
         throw error;
       }

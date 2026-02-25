@@ -93,22 +93,24 @@ export async function storeKycDataOnDataHaven(
     // ────────────────────────────────────────────────────────────────────────────
     console.log('[StorageService] STEP 3: Creating bucket...');
     
-    const bucketName = `kyc-${walletAddress.slice(2, 10).toLowerCase()}`;
+    // Use wallet address as the bucket name so bucket ID is deterministic per user
+    const bucketName = walletAddress.toLowerCase();
     let bucketId: string;
     
     try {
-      const result = await createBucket(bucketName, false);
+      // Private bucket — only the owner can read/write
+      const result = await createBucket(bucketName, true);
       bucketId = result.bucketId;
-      console.log('[StorageService] ✓ Bucket created:', bucketId);
+      console.log('[StorageService] ✓ Private bucket created:', bucketId);
       
       // Wait for backend to index the bucket
       console.log('[StorageService] Waiting for backend to index bucket...');
       await waitForBackendBucketReady(bucketId);
       console.log('[StorageService] ✓ Bucket ready in backend');
     } catch (err: any) {
-      // Check if bucket already exists
+      // Check if bucket already exists — reuse it
       if (err.message?.includes('already exists')) {
-        console.log('[StorageService] ℹ Bucket already exists, deriving ID...');
+        console.log('[StorageService] ℹ Bucket already exists, reusing...');
         const storageClient = getStorageHubClient();
         bucketId = await storageClient.deriveBucketId(walletAddress, bucketName) as string;
         console.log('[StorageService] ✓ Using existing bucket:', bucketId);
