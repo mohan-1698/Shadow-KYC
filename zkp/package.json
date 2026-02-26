@@ -1,0 +1,7 @@
+{
+
+  "dependencies": {
+    "circomlibjs": "^0.1.7",
+    "ffjavascript": "^0.3.1"
+  }
+}
