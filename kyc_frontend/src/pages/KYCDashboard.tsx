@@ -15,6 +15,7 @@ import { generateKycProofOnBackend, type KYCFlags } from "../apis/backendProofSe
 import { parsePublicSignals } from "../utils/zkp";
 import { storeKycDataOnDataHaven, type StorageResult } from "../services/storageService";
 import { getConnectedAddress } from "../services/clientService";
+import { getSepoliaSigner, buildStorageInput, storeProofOnChain, type StorageProofResult } from "../services/contractStorageService";
 
 interface KYCData {
   age: string;
@@ -51,6 +52,7 @@ const KYCDashboard = () => {
   const [publicJson, setPublicJson] = useState<any>(null);
   const [storageResult, setStorageResult] = useState<StorageResult | null>(null);
   const [isStoringData, setIsStoringData] = useState(false);
+  const [onChainProofResult, setOnChainProofResult] = useState<StorageProofResult | null>(null);
 
   const handleKYCSubmit = (data: KYCData) => {
     setKycData(data);
@@ -184,7 +186,7 @@ const KYCDashboard = () => {
         `🎉 ZK proof generated successfully! Credential Hash: ${credentialHash.toString().substring(0, 10)}...`
       );
 
-      // ── Store full KYC data on DataHaven Testnet ───────────────────
+      // ── STEP A: Store full KYC data on DataHaven Testnet (bucket storage) ──
       if (aadhaarUploadResult?.extractedData) {
         setIsStoringData(true);
         toast.info("Storing KYC data on DataHaven… (Please sign any MetaMask prompts)");
@@ -242,6 +244,42 @@ const KYCDashboard = () => {
         } finally {
           setIsStoringData(false);
         }
+      }
+
+      // ── STEP B: Store ZK proof on-chain (Sepolia testnet) ─────────────────
+      // Runs after DataHaven is fully complete.
+      let onChainResult: StorageProofResult | null = null;
+      try {
+        toast.info("Storing ZK proof on Sepolia… Please confirm in MetaMask.");
+        const signer = await getSepoliaSigner();
+
+        // credentialHash from backend is a decimal BigInt string → bytes32 hex
+        let credHash = result.credentialHash as string;
+        if (!credHash.startsWith("0x")) {
+          credHash = "0x" + BigInt(credHash).toString(16).padStart(64, "0");
+        }
+
+        const storageInput = buildStorageInput(
+          result.proof,
+          result.publicSignals,
+          credHash
+        );
+
+        onChainResult = await storeProofOnChain(signer, storageInput);
+        setOnChainProofResult(onChainResult);
+
+        toast.success("✅ ZK proof stored on Sepolia!", {
+          description: `Tx: ${onChainResult.txHash.slice(0, 18)}… | Block: ${onChainResult.blockNumber}`,
+          duration: 5000,
+        });
+        console.log("[KYCDashboard] On-chain proof stored:", onChainResult);
+      } catch (chainErr: any) {
+        const chainMsg = chainErr?.message ?? "On-chain storage failed";
+        console.warn("[KYCDashboard] On-chain proof storage failed (non-blocking):", chainMsg);
+        toast.warning("⚠️ On-chain proof storage skipped", {
+          description: chainMsg,
+          duration: 4000,
+        });
       }
       
       setTimeout(() => {
@@ -484,6 +522,7 @@ const KYCDashboard = () => {
                       txHash=""
                       proofJson={proofJson}
                       publicJson={publicJson}
+                      onChainProofResult={onChainProofResult}
                     />
                   </div>
                 ) : (

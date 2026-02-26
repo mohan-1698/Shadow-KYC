@@ -41,3 +41,17 @@ export {
 } from './storageService';
 
 export type { StorageResult, KYCDataToStore } from './storageService';
+
+export {
+  ZK_STORAGE_ADDRESS,
+  ZK_STORAGE_ABI,
+  getSepoliaSigner,
+  storeProofOnChain,
+  getMyProofFromChain,
+  buildStorageInput,
+  swapPiB,
+  transformProofFromReport,
+  buildVerifierInput,
+} from './contractStorageService';
+
+export type { StorageProofInput, StorageProofResult, StoredProof } from './contractStorageService';

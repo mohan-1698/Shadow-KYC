@@ -3,7 +3,23 @@ import { ethers } from "ethers";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { CheckCircle2, XCircle, Loader2, Wallet, Copy } from "lucide-react";
+import { CheckCircle2, XCircle, Loader2, Wallet, Copy, Database, ExternalLink } from "lucide-react";
+
+interface EthereumProvider {
+    request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+    on?(event: string, handler: (...args: unknown[]) => void): void;
+}
+import {
+  ZK_STORAGE_ADDRESS,
+  storeProofOnChain,
+  getMyProofFromChain,
+  buildStorageInput,
+  swapPiB,
+  transformProofFromReport,
+  buildVerifierInput,
+  type StorageProofResult,
+  type StoredProof,
+} from "@/services/contractStorageService";
 
 // Contract ABI
 const VERIFIER_ABI = [
@@ -43,8 +59,9 @@ const VERIFIER_ABI = [
     }
 ]
 
-const CONTRACT_ADDRESS = "0xe740dB54401524b286Ac35881013e6849300C14A";
+const CONTRACT_ADDRESS = "0x650Aa741F233b4A38Dd6a481f584AECf20ec55b5";
 const SEPOLIA_CHAIN_ID = 11155111;
+const SEPOLIA_EXPLORER = "https://sepolia.etherscan.io";
 
 interface VerificationResult {
     valid: boolean;
@@ -61,13 +78,208 @@ interface ProofInputs {
 
 export function ContractVerifier() {
     const [provider, setProvider] = useState<ethers.providers.Web3Provider | null>(null);
+    const [signer, setSigner] = useState<ethers.Signer | null>(null);
     const [connected, setConnected] = useState(false);
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState<VerificationResult | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [inputErrors, setInputErrors] = useState<Record<string, string>>({});
 
-    // Input state for proof data
+    // ── Store Proof state ──────────────────────────────────────────────────
+    const [storeLoading, setStoreLoading] = useState(false);
+    const [storeError, setStoreError] = useState<string | null>(null);
+    const [storeResult, setStoreResult] = useState<StorageProofResult | null>(null);
+    const [storedProof, setStoredProof] = useState<StoredProof | null>(null);
+    const [fetchingStored, setFetchingStored] = useState(false);
+
+    interface StoreInputs {
+        piAFull: string;  // uint256[3]
+        piBFull: string;  // uint256[2][3]  — 3 pairs
+        piCFull: string;  // uint256[3]
+        pubSignals: string; // uint256[3]
+        credentialHash: string;
+        timestamp: string;
+        algorithm: string;
+        curve: string;
+    }
+    const [storeInputs, setStoreInputs] = useState<StoreInputs>({
+        piAFull: '["0","0","1"]',
+        piBFull: '[["0","0"],["0","0"],["0","0"]]',
+        piCFull: '["0","0","1"]',
+        pubSignals: '["0","0","0"]',
+        credentialHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        algorithm: "groth16",
+        curve: "bn128",
+    });
+    const [storeInputErrors, setStoreInputErrors] = useState<Record<string, string>>({});
+
+    // ── Report JSON import state ───────────────────────────────────────────
+    const [reportJson, setReportJson] = useState("");
+    const [reportImportError, setReportImportError] = useState<string | null>(null);
+
+    // ── Verifier report import state ─────────────────────────────────────
+    const [verifierReportJson, setVerifierReportJson] = useState("");
+    const [verifierImportError, setVerifierImportError] = useState<string | null>(null);
+
+    /**
+     * Flexible JSON parser — tries multiple strategies so users can paste:
+     *   1. Full report JSON  { "zkProof": { ... } }
+     *   2. Just the zkProof subtree
+     *   3. Flat proof object { "pi_a":[...], "pi_b":[...], "pi_c":[...], "publicSignals":[...] }
+     *   4. Bare key-value paste (missing outer braces) — auto-wraps in {}
+     *
+     * Always returns a normalised shape:
+     *   { pi_a, pi_b, pi_c, publicSignals }  — ready for buildVerifierInput / transformProofFromReport
+     */
+    const flexParseProof = (raw: string): {
+        pi_a: string[];
+        pi_b: string[][];
+        pi_c: string[];
+        publicSignals: string[];
+        credentialHash?: string;
+        protocol?: string;
+        curve?: string;
+    } => {
+        // strategy 1 & 4: try direct parse, then auto-wrap
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(raw);
+        } catch {
+            const trimmed = raw.trim();
+            // If it looks like bare key:value pairs, wrap in {}
+            const wrapped = (trimmed.startsWith("{") ? trimmed : `{${trimmed}}`);
+            try {
+                parsed = JSON.parse(wrapped);
+            } catch {
+                throw new Error("Could not parse JSON. Make sure the pasted text is valid JSON or wrap it in { }.");
+            }
+        }
+
+        const obj = parsed as Record<string, unknown>;
+
+        // strategy 2: full report  { walletAddress, zkProof, ... }
+        if (obj.zkProof) {
+            const zk = obj.zkProof as Record<string, unknown>;
+            const inner = (zk.proof as Record<string, unknown>)?.proof as Record<string, unknown>;
+            const sigs = ((zk.publicSignals as Record<string, unknown>)?.publicSignals as string[]);
+            return {
+                pi_a: inner.pi_a as string[],
+                pi_b: inner.pi_b as string[][],
+                pi_c: inner.pi_c as string[],
+                publicSignals: sigs,
+                credentialHash: (zk.proof as Record<string, unknown>)?.credentialHash as string,
+                protocol: inner.protocol as string,
+                curve: inner.curve as string,
+            };
+        }
+
+        // strategy 3: zkProof subtree  { proof: { proof: {...} }, publicSignals: {...} }
+        if (obj.proof && (obj.proof as Record<string, unknown>).proof) {
+            const inner = (obj.proof as Record<string, unknown>).proof as Record<string, unknown>;
+            const sigs = ((obj.publicSignals as Record<string, unknown>)?.publicSignals as string[]);
+            return {
+                pi_a: inner.pi_a as string[],
+                pi_b: inner.pi_b as string[][],
+                pi_c: inner.pi_c as string[],
+                publicSignals: sigs,
+                credentialHash: (obj.proof as Record<string, unknown>).credentialHash as string,
+                protocol: inner.protocol as string,
+                curve: inner.curve as string,
+            };
+        }
+
+        // strategy 4: flat  { pi_a, pi_b, pi_c, publicSignals }
+        if (obj.pi_a && obj.pi_b && obj.pi_c) {
+            const sigs = (obj.publicSignals ?? obj.pubSignals) as string[] | { publicSignals: string[] };
+            const sigArray = Array.isArray(sigs) ? sigs : (sigs as { publicSignals: string[] }).publicSignals;
+            return {
+                pi_a: obj.pi_a as string[],
+                pi_b: obj.pi_b as string[][],
+                pi_c: obj.pi_c as string[],
+                publicSignals: sigArray,
+                credentialHash: obj.credentialHash as string | undefined,
+                protocol: obj.protocol as string | undefined,
+                curve: obj.curve as string | undefined,
+            };
+        }
+
+        throw new Error(
+            "Unrecognised format. Paste the full report JSON, the zkProof section, " +
+            "or a flat object with pi_a / pi_b / pi_c / publicSignals keys."
+        );
+    };
+
+    // Import proof from report into verifier fields
+    const handleImportVerifierFromReport = () => {
+        setVerifierImportError(null);
+        try {
+            const proof = flexParseProof(verifierReportJson);
+
+            // pA: first 2 elements (drop projective "1")
+            const pA: [string, string] = [proof.pi_a[0], proof.pi_a[1]];
+            // pB: swap pair[0] and pair[1]; drop pair[2] (projective)
+            const pB: [[string, string], [string, string]] = [
+                [proof.pi_b[0][1], proof.pi_b[0][0]],
+                [proof.pi_b[1][1], proof.pi_b[1][0]],
+            ];
+            // pC: first 2 elements
+            const pC: [string, string] = [proof.pi_c[0], proof.pi_c[1]];
+            const pubSigs: [string, string, string] = [
+                proof.publicSignals[0], proof.publicSignals[1], proof.publicSignals[2],
+            ];
+
+            setInputs({
+                pA: JSON.stringify(pA),
+                pB: JSON.stringify(pB),
+                pC: JSON.stringify(pC),
+                pubSignals: JSON.stringify(pubSigs),
+            });
+            setInputErrors({});
+            setVerifierReportJson("");
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Failed to parse";
+            setVerifierImportError(msg);
+        }
+    };
+
+    // Import proof from KYC verification report JSON (for Store section)
+    const handleImportFromReport = () => {
+        setReportImportError(null);
+        try {
+            const proof = flexParseProof(reportJson);
+
+            // credentialHash: decimal bigint → 0x-padded bytes32 hex
+            let credHash = proof.credentialHash ?? "0x" + "0".repeat(64);
+            if (!credHash.startsWith("0x")) {
+                credHash = "0x" + BigInt(credHash).toString(16).padStart(64, "0");
+            }
+
+            // pi_b full (3 pairs): swap pair[0] and [1], keep pair[2] as-is
+            const rawPiB = proof.pi_b;
+            const piBFull: [[string,string],[string,string],[string,string]] = [
+                [rawPiB[0][1], rawPiB[0][0]],
+                [rawPiB[1][1], rawPiB[1][0]],
+                rawPiB[2] ? [rawPiB[2][0], rawPiB[2][1]] : ["1", "0"],
+            ];
+
+            setStoreInputs({
+                piAFull: JSON.stringify([proof.pi_a[0], proof.pi_a[1], proof.pi_a[2] ?? "1"]),
+                piBFull: JSON.stringify(piBFull),
+                piCFull: JSON.stringify([proof.pi_c[0], proof.pi_c[1], proof.pi_c[2] ?? "1"]),
+                pubSignals: JSON.stringify([proof.publicSignals[0], proof.publicSignals[1], proof.publicSignals[2]]),
+                credentialHash: credHash,
+                timestamp: String(Math.floor(Date.now() / 1000)),
+                algorithm: proof.protocol ?? "groth16",
+                curve: proof.curve ?? "bn128",
+            });
+
+            setReportJson("");
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Failed to parse report JSON";
+            setReportImportError(msg);
+        }
+    };
     const [inputs, setInputs] = useState<ProofInputs>({
         pA: '["9145378444307675700604608785609512456551660761728279953972235841585655667766","20073329690138798698505289440597358629433265538981431097759303133475963710104"]',
         pB: '[["2034775962211501271100480579549775321877788201658822461916990234715157422090","12682102588970756874931896038273943141643204748335675794279497992220824762582"],["11288082119370304188105598595519095581033256072925531892983511610903093971646","17467515397705288659240659303323431748189185015510142105485827260507189332175"]]',
@@ -78,30 +290,38 @@ export function ContractVerifier() {
     // Connect wallet
     const connectWallet = async () => {
         try {
-            if (!window.ethereum) {
+            const ethereum = window.ethereum as EthereumProvider | undefined;
+            if (!ethereum) {
                 throw new Error("MetaMask not installed");
             }
 
             // Request account access
-            const accounts = await window.ethereum.request({
-                method: "eth_requestAccounts",
-            });
+            const accounts = await ethereum.request({ method: "eth_requestAccounts" }) as string[];
 
-            // Check network
-            const chainId = await window.ethereum.request({
-                method: "eth_chainId",
-            });
+            // Check network — enforce Sepolia only
+            const chainIdHex = await ethereum.request({ method: "eth_chainId" }) as string;
+            const chainId = parseInt(chainIdHex, 16);
 
-            if (parseInt(chainId, 16) !== SEPOLIA_CHAIN_ID) {
-                throw new Error("Please switch to Sepolia testnet");
+            if (chainId !== SEPOLIA_CHAIN_ID) {
+                // Try to switch automatically
+                try {
+                    await ethereum.request({
+                        method: "wallet_switchEthereumChain",
+                        params: [{ chainId: "0xaa36a7" }], // Sepolia
+                    });
+                } catch {
+                    throw new Error("Please switch MetaMask to Sepolia testnet (Chain ID 11155111)");
+                }
             }
 
-            // Create provider
-            const ethProvider = new ethers.providers.Web3Provider(window.ethereum);
+            // Create provider + signer
+            const ethProvider = new ethers.providers.Web3Provider(ethereum as never);
+            const ethSigner = ethProvider.getSigner();
             setProvider(ethProvider);
+            setSigner(ethSigner);
             setConnected(true);
             setError(null);
-            console.log("✅ Connected to wallet:", accounts[0]);
+            console.log("✅ Connected to Sepolia wallet:", accounts[0]);
         } catch (err) {
             const errorMsg = err instanceof Error ? err.message : "Failed to connect";
             setError(errorMsg);
@@ -229,6 +449,107 @@ export function ContractVerifier() {
         navigator.clipboard.writeText(text);
     };
 
+    // ── Store proof on Sepolia ─────────────────────────────────────────────
+    const handleStoreProof = async () => {
+        if (!signer) { setStoreError("Wallet not connected"); return; }
+
+        setStoreLoading(true);
+        setStoreError(null);
+        setStoreResult(null);
+        const errs: Record<string, string> = {};
+
+        try {
+            // Parse JSON fields
+            const piAFull = JSON.parse(storeInputs.piAFull);
+            const piBFull = JSON.parse(storeInputs.piBFull);
+            const piCFull = JSON.parse(storeInputs.piCFull);
+            const pubSigs  = JSON.parse(storeInputs.pubSignals);
+
+            if (!Array.isArray(piAFull) || piAFull.length !== 3)
+                errs.piAFull = "pi_a must be uint256[3] — array of 3 elements";
+            if (!Array.isArray(piBFull) || piBFull.length !== 3 ||
+                !piBFull.every((p: unknown) => Array.isArray(p) && (p as unknown[]).length === 2))
+                errs.piBFull = "pi_b must be uint256[2][3] — array of 3 pairs";
+            if (!Array.isArray(piCFull) || piCFull.length !== 3)
+                errs.piCFull = "pi_c must be uint256[3] — array of 3 elements";
+            if (!Array.isArray(pubSigs) || pubSigs.length !== 3)
+                errs.pubSignals = "publicSignals must be uint256[3] — array of 3";
+
+            if (Object.keys(errs).length > 0) {
+                setStoreInputErrors(errs);
+                setStoreLoading(false);
+                return;
+            }
+            setStoreInputErrors({});
+
+            const ts = parseInt(storeInputs.timestamp) || Math.floor(Date.now() / 1000);
+
+            const result = await storeProofOnChain(signer, {
+                pi_a_full: piAFull as [string, string, string],
+                pi_b_full: piBFull as [[string, string],[string, string],[string, string]],
+                pi_c_full: piCFull as [string, string, string],
+                publicSignals: pubSigs as [string, string, string],
+                credentialHash: storeInputs.credentialHash,
+                timestamp: ts,
+                algorithm: storeInputs.algorithm,
+                curve: storeInputs.curve,
+            });
+
+            setStoreResult(result);
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "storeProof failed";
+            console.error("storeProof error:", msg);
+            setStoreError(msg);
+        } finally {
+            setStoreLoading(false);
+        }
+    };
+
+    // Fetch stored proof for current account
+    const handleFetchMyProof = async () => {
+        // Must use signer, not provider — contract reads msg.sender internally
+        if (!signer) { setStoreError("Wallet not connected"); return; }
+        setFetchingStored(true);
+        setStoreError(null);
+        try {
+            const proof = await getMyProofFromChain(signer);
+            setStoredProof(proof);
+            if (!proof) setStoreError("No proof stored for this address yet.");
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : "Fetch failed";
+            setStoreError(msg);
+        } finally {
+            setFetchingStored(false);
+        }
+    };
+
+    // Auto-fill store inputs from the current verifier proof fields
+    const autoFillFromVerifier = () => {
+        try {
+            const pA = JSON.parse(inputs.pA) as string[];
+            const pB = JSON.parse(inputs.pB) as string[][];
+            const pC = JSON.parse(inputs.pC) as string[];
+
+            // Extend affine to projective (append "1")
+            const piAFull: [string, string, string] = [pA[0], pA[1], "1"];
+            const piCFull: [string, string, string] = [pC[0], pC[1], "1"];
+            // pi_b from the verifier is already [2][2] affine; add a third dummy row for storage
+            const swapped = swapPiB([...pB, ["1", "0"]]);
+            const piBFull = swapped;
+
+            setStoreInputs(prev => ({
+                ...prev,
+                piAFull: JSON.stringify(piAFull),
+                piBFull: JSON.stringify(piBFull),
+                piCFull: JSON.stringify(piCFull),
+                pubSignals: inputs.pubSignals,
+                timestamp: String(Math.floor(Date.now() / 1000)),
+            }));
+        } catch {
+            setStoreError("Failed to auto-fill: ensure verifier fields have valid JSON.");
+        }
+    };
+
     // Transform proof with element reordering (pi_b reversal)
     const transformProofFormat = () => {
         try {
@@ -292,6 +613,37 @@ export function ContractVerifier() {
                             {connected ? "✅ Connected" : "Connect Wallet"}
                         </Button>
                     </div>
+                </div>
+
+                {/* ── Import from KYC Report (Verifier) ── */}
+                <div className="space-y-2 bg-purple-50 dark:bg-purple-950 p-3 rounded">
+                    <p className="text-xs font-semibold text-purple-800 dark:text-purple-200">
+                        Import Proof from KYC Verification Report
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Paste your report JSON. pB is automatically transformed:
+                        pair[0] &amp; pair[1] swapped <code>[x,y]→[y,x]</code>, projective pair[2] dropped.
+                        Accepts: full report, zkProof section, flat object, or bare <code>"pi_a":[...]</code> fields.
+                    </p>
+                    <textarea
+                        value={verifierReportJson}
+                        onChange={e => { setVerifierReportJson(e.target.value); setVerifierImportError(null); }}
+                        className="w-full p-2 rounded border text-xs font-mono resize-none focus:outline-none focus:ring-2 border-gray-300 focus:ring-purple-500 bg-white dark:bg-gray-900"
+                        rows={4}
+                        placeholder={`Accepts any of:\n• Full report JSON  { "walletAddress": "", "zkProof": { ... } }\n• zkProof section   { "proof": { "proof": {...} }, "publicSignals": {...} }\n• Flat object       { "pi_a":[...], "pi_b":[...], "pi_c":[...], "publicSignals":[...] }\n• Bare fields       "pi_a":[...], "pi_b":[...], "pi_c":[...], "publicSignals":[...]`}
+                    />
+                    {verifierImportError && (
+                        <p className="text-xs text-red-500">{verifierImportError}</p>
+                    )}
+                    <Button
+                        variant="default"
+                        size="sm"
+                        onClick={handleImportVerifierFromReport}
+                        disabled={!verifierReportJson.trim() || loading}
+                        className="w-full bg-purple-600 hover:bg-purple-700"
+                    >
+                        Import &amp; Fill Verifier Fields
+                    </Button>
                 </div>
 
                 {/* Proof Input Fields */}
@@ -457,14 +809,239 @@ export function ContractVerifier() {
                         <strong>Network:</strong> Sepolia (Chain ID: 11155111)
                     </p>
                 </div>
+
+                {/* ── Store Proof on Sepolia ───────────────────────────────── */}
+                <div className="border-t pt-6 space-y-4">
+                    <h2 className="text-lg font-bold flex items-center gap-2">
+                        <Database className="w-5 h-5" />
+                        Store Proof on Sepolia
+                    </h2>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Calls <code>storeProof()</code> on <strong>ZKProofStorage</strong> and persists
+                        your groth16 proof on-chain.
+                        Contract:&nbsp;
+                        <a
+                            href={`${SEPOLIA_EXPLORER}/address/${ZK_STORAGE_ADDRESS}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-blue-500 underline break-all"
+                        >
+                            {ZK_STORAGE_ADDRESS}
+                        </a>
+                    </p>
+
+                    {/* ── Import from KYC Report JSON ── */}
+                    <div className="space-y-2 bg-indigo-50 dark:bg-indigo-950 p-3 rounded">
+                        <p className="text-xs font-semibold">Paste KYC Verification Report JSON</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                            Paste the full report JSON (or just the <code>zkProof</code> section, or bare proof fields).
+                            pi_b is transformed automatically: pairs 0 &amp; 1 are swapped [y,x], pair 2 kept as-is.
+                        </p>
+                        <textarea
+                            value={reportJson}
+                            onChange={e => { setReportJson(e.target.value); setReportImportError(null); }}
+                            className="w-full p-2 rounded border text-xs font-mono resize-none focus:outline-none focus:ring-2 border-gray-300 focus:ring-indigo-500 bg-white dark:bg-gray-900"
+                            rows={4}
+                            placeholder={`Accepts any of:\n• Full report JSON  { "walletAddress": "", "zkProof": { ... } }\n• zkProof section   { "proof": { "proof": {...} }, "publicSignals": {...} }\n• Flat object       { "pi_a":[...], "pi_b":[...], "pi_c":[...], "publicSignals":[...] }\n• Bare fields       "pi_a":[...], "pi_b":[...], "pi_c":[...], "publicSignals":[...]`}
+                        />
+                        {reportImportError && (
+                            <p className="text-xs text-red-500">{reportImportError}</p>
+                        )}
+                        <Button
+                            variant="default"
+                            size="sm"
+                            onClick={handleImportFromReport}
+                            disabled={!reportJson.trim() || storeLoading}
+                            className="w-full"
+                        >
+                            Import &amp; Transform from Report
+                        </Button>
+                    </div>
+
+                    {/* Auto-fill helper */}
+                    <Button variant="outline" size="sm" onClick={autoFillFromVerifier} disabled={storeLoading}>
+                        ↑ Auto-fill from Verifier fields above
+                    </Button>
+
+                    {/* pi_a_full */}
+                    <div className="space-y-1">
+                        <label className="text-xs font-semibold">pi_a_full (uint256[3])</label>
+                        <textarea
+                            value={storeInputs.piAFull}
+                            onChange={e => setStoreInputs(p => ({ ...p, piAFull: e.target.value }))}
+                            className={`w-full p-2 rounded border text-xs font-mono resize-none focus:outline-none focus:ring-2 ${storeInputErrors.piAFull ? "border-red-500 focus:ring-red-500" : "border-gray-300 focus:ring-blue-500"}`}
+                            rows={2}
+                            placeholder='["x","y","1"]'
+                        />
+                        {storeInputErrors.piAFull && <p className="text-xs text-red-500">{storeInputErrors.piAFull}</p>}
+                        <p className="text-xs text-gray-500">Full projective point — 3 elements (append "1")</p>
+                    </div>
+
+                    {/* pi_b_full */}
+                    <div className="space-y-1">
+                        <label className="text-xs font-semibold">pi_b_full (uint256[2][3]) — 3 pairs, G2 swapped</label>
+                        <textarea
+                            value={storeInputs.piBFull}
+                            onChange={e => setStoreInputs(p => ({ ...p, piBFull: e.target.value }))}
+                            className={`w-full p-2 rounded border text-xs font-mono resize-none focus:outline-none focus:ring-2 ${storeInputErrors.piBFull ? "border-red-500 focus:ring-red-500" : "border-gray-300 focus:ring-blue-500"}`}
+                            rows={3}
+                            placeholder='[["y0","x0"],["y1","x1"],["y2","x2"]]'
+                        />
+                        {storeInputErrors.piBFull && <p className="text-xs text-red-500">{storeInputErrors.piBFull}</p>}
+                        <p className="text-xs text-gray-500">3 pairs — each pair is [y,x] (G2 element swap applied)</p>
+                    </div>
+
+                    {/* pi_c_full */}
+                    <div className="space-y-1">
+                        <label className="text-xs font-semibold">pi_c_full (uint256[3])</label>
+                        <textarea
+                            value={storeInputs.piCFull}
+                            onChange={e => setStoreInputs(p => ({ ...p, piCFull: e.target.value }))}
+                            className={`w-full p-2 rounded border text-xs font-mono resize-none focus:outline-none focus:ring-2 ${storeInputErrors.piCFull ? "border-red-500 focus:ring-red-500" : "border-gray-300 focus:ring-blue-500"}`}
+                            rows={2}
+                            placeholder='["x","y","1"]'
+                        />
+                        {storeInputErrors.piCFull && <p className="text-xs text-red-500">{storeInputErrors.piCFull}</p>}
+                        <p className="text-xs text-gray-500">Full projective point — 3 elements (append "1")</p>
+                    </div>
+
+                    {/* publicSignals */}
+                    <div className="space-y-1">
+                        <label className="text-xs font-semibold">Public Signals (uint256[3])</label>
+                        <textarea
+                            value={storeInputs.pubSignals}
+                            onChange={e => setStoreInputs(p => ({ ...p, pubSignals: e.target.value }))}
+                            className={`w-full p-2 rounded border text-xs font-mono resize-none focus:outline-none focus:ring-2 ${storeInputErrors.pubSignals ? "border-red-500 focus:ring-red-500" : "border-gray-300 focus:ring-blue-500"}`}
+                            rows={2}
+                            placeholder='["s0","s1","s2"]'
+                        />
+                        {storeInputErrors.pubSignals && <p className="text-xs text-red-500">{storeInputErrors.pubSignals}</p>}
+                    </div>
+
+                    {/* credentialHash */}
+                    <div className="space-y-1">
+                        <label className="text-xs font-semibold">Credential Hash (bytes32)</label>
+                        <input
+                            type="text"
+                            value={storeInputs.credentialHash}
+                            onChange={e => setStoreInputs(p => ({ ...p, credentialHash: e.target.value }))}
+                            className="w-full p-2 rounded border text-xs font-mono focus:outline-none focus:ring-2 border-gray-300 focus:ring-blue-500"
+                            placeholder="0x..."
+                        />
+                    </div>
+
+                    {/* timestamp + algorithm + curve (row) */}
+                    <div className="grid grid-cols-3 gap-3">
+                        <div className="space-y-1">
+                            <label className="text-xs font-semibold">Timestamp (unix)</label>
+                            <input
+                                type="number"
+                                value={storeInputs.timestamp}
+                                onChange={e => setStoreInputs(p => ({ ...p, timestamp: e.target.value }))}
+                                className="w-full p-2 rounded border text-xs font-mono focus:outline-none focus:ring-2 border-gray-300 focus:ring-blue-500"
+                            />
+                        </div>
+                        <div className="space-y-1">
+                            <label className="text-xs font-semibold">Algorithm</label>
+                            <input
+                                type="text"
+                                value={storeInputs.algorithm}
+                                onChange={e => setStoreInputs(p => ({ ...p, algorithm: e.target.value }))}
+                                className="w-full p-2 rounded border text-xs font-mono focus:outline-none focus:ring-2 border-gray-300 focus:ring-blue-500"
+                                placeholder="groth16"
+                            />
+                        </div>
+                        <div className="space-y-1">
+                            <label className="text-xs font-semibold">Curve</label>
+                            <input
+                                type="text"
+                                value={storeInputs.curve}
+                                onChange={e => setStoreInputs(p => ({ ...p, curve: e.target.value }))}
+                                className="w-full p-2 rounded border text-xs font-mono focus:outline-none focus:ring-2 border-gray-300 focus:ring-blue-500"
+                                placeholder="bn128"
+                            />
+                        </div>
+                    </div>
+
+                    {/* Store button */}
+                    <Button
+                        onClick={handleStoreProof}
+                        disabled={!connected || storeLoading}
+                        className="w-full"
+                        size="lg"
+                    >
+                        {storeLoading ? (
+                            <>
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                Storing on Sepolia…
+                            </>
+                        ) : (
+                            "Store Proof on Sepolia"
+                        )}
+                    </Button>
+
+                    {/* Fetch my proof button */}
+                    <Button
+                        onClick={handleFetchMyProof}
+                        disabled={!connected || fetchingStored}
+                        variant="outline"
+                        className="w-full"
+                    >
+                        {fetchingStored ? (
+                            <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Fetching…</>
+                        ) : (
+                            "Fetch My Stored Proof"
+                        )}
+                    </Button>
+
+                    {/* Store error */}
+                    {storeError && (
+                        <Alert variant="destructive">
+                            <XCircle className="w-4 h-4" />
+                            <AlertDescription>{storeError}</AlertDescription>
+                        </Alert>
+                    )}
+
+                    {/* Store success */}
+                    {storeResult && (
+                        <Alert className="border-green-500 bg-green-50 dark:bg-green-950">
+                            <CheckCircle2 className="w-5 h-5 text-green-600" />
+                            <div className="ml-2 space-y-1">
+                                <p className="font-semibold text-sm">Proof stored on Sepolia!</p>
+                                <p className="text-xs text-gray-600 dark:text-gray-300">Block: {storeResult.blockNumber}</p>
+                                <a
+                                    href={`${SEPOLIA_EXPLORER}/tx/${storeResult.txHash}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-xs text-blue-600 underline flex items-center gap-1"
+                                >
+                                    View on Etherscan <ExternalLink className="w-3 h-3" />
+                                </a>
+                            </div>
+                        </Alert>
+                    )}
+
+                    {/* Fetched proof display */}
+                    {storedProof && (
+                        <div className="bg-gray-50 dark:bg-gray-900 rounded p-4 text-xs font-mono space-y-1 border">
+                            <p className="font-semibold text-sm mb-2">Your On-Chain Proof</p>
+                            <p><strong>Algorithm:</strong> {storedProof.algorithm} | <strong>Curve:</strong> {storedProof.curve}</p>
+                            <p><strong>Timestamp:</strong> {new Date(storedProof.timestamp * 1000).toLocaleString()}</p>
+                            <p><strong>Credential Hash:</strong> <span className="break-all">{storedProof.credentialHash}</span></p>
+                            <p><strong>Public Signals:</strong> {storedProof.publicSignals.join(", ")}</p>
+                        </div>
+                    )}
+
+                    {/* Info row */}
+                    <div className="bg-gray-100 dark:bg-gray-900 p-3 rounded text-xs space-y-1">
+                        <p><strong>Contract:</strong> ZKProofStorage</p>
+                        <p><strong>Function:</strong> storeProof(_pi_a_full, _pi_b_full, _pi_c_full, _publicSignals, _credentialHash, _timestamp, _algorithm, _curve)</p>
+                        <p><strong>Network:</strong> Sepolia (Chain ID: 11155111)</p>
+                    </div>
+                </div>
             </CardContent>
         </Card>
     );
 }
 
-// Add ethers type support
-declare global {
-    interface Window {
-        ethereum?: any;
-    }
-}
+

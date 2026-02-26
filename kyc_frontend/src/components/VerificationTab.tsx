@@ -5,8 +5,6 @@ import {
   AlertCircle, 
   ExternalLink, 
   Copy, 
-  Loader2,
-  Eye,
   Download,
   Share2,
   Clock
@@ -17,7 +15,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Separator } from '@/components/ui/separator';
 import { Progress } from '@/components/ui/progress';
 import { toast } from 'sonner';
 
@@ -31,21 +28,7 @@ interface VerificationTabProps {
   txHash?: string;
   proofJson?: any;
   publicJson?: any;
-}
-
-interface NFTMetadata {
-  tokenId: string;
-  contractAddress: string;
-  name: string;
-  description: string;
-  image: string;
-  attributes: Array<{
-    trait_type: string;
-    value: string;
-  }>;
-  verificationLevel: 'basic' | 'advanced' | 'premium';
-  issuedAt: Date;
-  expiresAt?: Date;
+  onChainProofResult?: { txHash: string; blockNumber?: number } | null;
 }
 
 interface VerificationStatus {
@@ -69,7 +52,8 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
   ipfsHash,
   txHash,
   proofJson,
-  publicJson
+  publicJson,
+  onChainProofResult,
 }) => {
   const [verificationStatus, setVerificationStatus] = useState<VerificationStatus>({
     stage: 'pending',
@@ -83,9 +67,6 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
     timestamp: new Date()
   });
 
-  const [nftMetadata, setNftMetadata] = useState<NFTMetadata | null>(null);
-  const [isLoadingNFT, setIsLoadingNFT] = useState(false);
-  const [blockchainStatus, setBlockchainStatus] = useState<'pending' | 'confirmed' | 'failed'>('pending');
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
 
   // Update verification status based on completed steps
@@ -110,51 +91,7 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
       details,
       timestamp: new Date()
     });
-
-    // Generate NFT metadata if verification is complete
-    if (stage === 'verified' && !nftMetadata) {
-      generateNFTMetadata();
-    }
   }, [aadhaarUploadResult, faceVerificationResult, proofData, txHash]);
-
-  // Generate NFT metadata for successful verification
-  const generateNFTMetadata = async () => {
-    setIsLoadingNFT(true);
-    
-    try {
-      // Simulate NFT generation (in real implementation, this would call smart contract)
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const metadata: NFTMetadata = {
-        tokenId: `KYC-${Date.now()}`,
-        contractAddress: "0x..." + Math.random().toString(16).substr(2, 8),
-        name: "KYC Verification NFT",
-        description: "Privacy-preserving KYC verification using zero-knowledge proofs",
-        image: `https://api.dicebear.com/7.x/identicon/svg?seed=${userWalletAddress}`,
-        attributes: [
-          { trait_type: "Verification Level", value: "Advanced" },
-          { trait_type: "Aadhaar Verified", value: "Yes" },
-          { trait_type: "Face Matched", value: "Yes" },
-          { trait_type: "ZK Proof", value: "Generated" },
-          { trait_type: "Blockchain", value: "Confirmed" },
-          { trait_type: "Confidence", value: `${verificationStatus.confidence.toFixed(1)}%` }
-        ],
-        verificationLevel: 'advanced',
-        issuedAt: new Date(),
-        expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000) // 1 year
-      };
-      
-      setNftMetadata(metadata);
-      setBlockchainStatus('confirmed');
-      toast.success('KYC verification NFT generated successfully!');
-    } catch (error) {
-      console.error('NFT generation failed:', error);
-      setBlockchainStatus('failed');
-      toast.error('Failed to generate verification NFT');
-    } finally {
-      setIsLoadingNFT(false);
-    }
-  };
 
   const copyToClipboard = (text: string, label: string) => {
     navigator.clipboard.writeText(text);
@@ -179,7 +116,7 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
     const report = {
       walletAddress: userWalletAddress,
       verificationStatus,
-      nftMetadata,
+      onChain: onChainProofResult ?? null,
       timestamp: new Date().toISOString(),
       proofHash: ipfsHash,
       transactionHash: txHash,
@@ -287,7 +224,7 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
       <Tabs defaultValue="offchain" className="w-full">
         <TabsList className="grid w-full grid-cols-2">
           <TabsTrigger value="offchain">Off-Chain Verification</TabsTrigger>
-          <TabsTrigger value="onchain">On-Chain NFT</TabsTrigger>
+          <TabsTrigger value="onchain">On-Chain</TabsTrigger>
         </TabsList>
 
         {/* Off-Chain Verification */}
@@ -444,99 +381,189 @@ export const VerificationTab: React.FC<VerificationTabProps> = ({
           </Card>
         </TabsContent>
 
-        {/* On-Chain NFT */}
+        {/* On-Chain (Sepolia) */}
         <TabsContent value="onchain" className="space-y-4">
-          {nftMetadata ? (
-            <Card>
-              <CardHeader>
-                <CardTitle>KYC Verification NFT</CardTitle>
-                <CardDescription>
-                  Your soulbound NFT representing verified identity
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="flex items-start gap-4">
-                  <img
-                    src={nftMetadata.image}
-                    alt="KYC NFT"
-                    className="w-24 h-24 rounded-lg border"
-                  />
-                  <div className="flex-1">
-                    <h3 className="font-semibold">{nftMetadata.name}</h3>
-                    <p className="text-sm text-gray-600 mb-2">{nftMetadata.description}</p>
-                    <div className="flex items-center gap-2 text-sm">
-                      <Badge variant="outline">Token ID: {nftMetadata.tokenId}</Badge>
-                      <Badge variant="outline">Level: {nftMetadata.verificationLevel}</Badge>
+          {onChainProofResult ? (
+            <>
+              {/* Transaction confirmation */}
+              <Card className="border-green-500/40 bg-green-500/5">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                    <CheckCircle className="h-5 w-5" />
+                    ZK Proof Stored on Sepolia
+                  </CardTitle>
+                  <CardDescription>
+                    Your zero-knowledge proof is permanently recorded on the Ethereum Sepolia testnet.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Tx hash */}
+                  <div className="rounded-lg border p-3 space-y-1">
+                    <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Transaction Hash</p>
+                    <div className="flex items-center gap-2">
+                      <code className="text-xs break-all flex-1">{onChainProofResult.txHash}</code>
+                      <Button
+                        variant="ghost" size="icon"
+                        className="shrink-0 h-7 w-7"
+                        onClick={() => copyToClipboard(onChainProofResult.txHash, 'Transaction hash')}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost" size="icon"
+                        className="shrink-0 h-7 w-7"
+                        onClick={() => window.open(`https://sepolia.etherscan.io/tx/${onChainProofResult.txHash}`, '_blank')}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
                   </div>
-                </div>
 
-                <Separator />
-
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                  {nftMetadata.attributes.map((attr, index) => (
-                    <div key={index} className="text-center p-3 border rounded-lg">
-                      <p className="text-xs text-gray-500">{attr.trait_type}</p>
-                      <p className="font-medium">{attr.value}</p>
-                    </div>
-                  ))}
-                </div>
-
-                <div className="flex items-center justify-between text-sm text-gray-600">
-                  <div>
-                    <span>Issued: </span>
-                    {nftMetadata.issuedAt.toLocaleDateString()}
-                  </div>
-                  {nftMetadata.expiresAt && (
-                    <div>
-                      <span>Expires: </span>
-                      {nftMetadata.expiresAt.toLocaleDateString()}
+                  {/* Block number */}
+                  {onChainProofResult.blockNumber && (
+                    <div className="rounded-lg border p-3 space-y-1">
+                      <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Block Number</p>
+                      <div className="flex items-center gap-2">
+                        <code className="text-sm font-semibold">{onChainProofResult.blockNumber.toLocaleString()}</code>
+                        <Button
+                          variant="ghost" size="icon"
+                          className="shrink-0 h-7 w-7"
+                          onClick={() => window.open(`https://sepolia.etherscan.io/block/${onChainProofResult.blockNumber}`, '_blank')}
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                     </div>
                   )}
-                </div>
 
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={() => copyToClipboard(nftMetadata.contractAddress, 'Contract address')}
-                  >
-                    <Copy className="h-4 w-4 mr-2" />
-                    Copy Contract
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      window.open(`https://opensea.io/assets/ethereum/${nftMetadata.contractAddress}/${nftMetadata.tokenId}`, '_blank');
-                    }}
-                  >
-                    <ExternalLink className="h-4 w-4 mr-2" />
-                    View on OpenSea
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          ) : verificationStatus.stage === 'verified' && isLoadingNFT ? (
-            <Card>
-              <CardContent className="flex items-center justify-center py-8">
-                <div className="text-center">
-                  <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
-                  <p>Generating your KYC verification NFT...</p>
-                </div>
-              </CardContent>
-            </Card>
+                  {/* Network + algorithm badges */}
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="outline">Network: Sepolia</Badge>
+                    <Badge variant="outline">Algorithm: Groth16</Badge>
+                    <Badge variant="outline">Curve: BN128</Badge>
+                    <Badge variant="outline">Chain ID: 11155111</Badge>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Proof components */}
+              {proofJson?.proof && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Proof Components</CardTitle>
+                    <CardDescription>The Groth16 proof elements stored on-chain</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {[
+                      { label: 'pi_A', value: proofJson.proof.pi_a },
+                      { label: 'pi_B', value: proofJson.proof.pi_b },
+                      { label: 'pi_C', value: proofJson.proof.pi_c },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="rounded-lg border p-3 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">{label}</p>
+                          <Button
+                            variant="ghost" size="icon"
+                            className="h-6 w-6"
+                            onClick={() => copyToClipboard(JSON.stringify(value), label)}
+                          >
+                            <Copy className="h-3 w-3" />
+                          </Button>
+                        </div>
+                        <code className="text-xs break-all text-muted-foreground">{JSON.stringify(value)}</code>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Public signals */}
+              {publicJson?.publicSignals && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Public Signals</CardTitle>
+                    <CardDescription>Publicly verifiable outputs from the ZK circuit</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {(publicJson.publicSignals as string[]).map((sig: string, i: number) => (
+                        <div key={i} className="rounded-lg border p-3 space-y-1">
+                          <p className="text-xs text-muted-foreground">Signal [{i}]</p>
+                          <div className="flex items-center gap-1">
+                            <code className="text-xs break-all flex-1">{sig.length > 20 ? sig.slice(0, 10) + '…' + sig.slice(-8) : sig}</code>
+                            <Button
+                              variant="ghost" size="icon"
+                              className="h-6 w-6 shrink-0"
+                              onClick={() => copyToClipboard(sig, `Signal [${i}]`)}
+                            >
+                              <Copy className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    {publicJson.credentialHash && (
+                      <div className="mt-3 rounded-lg border p-3 space-y-1">
+                        <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">Credential Hash (bytes32)</p>
+                        <div className="flex items-center gap-2">
+                          <code className="text-xs break-all flex-1">{publicJson.credentialHash}</code>
+                          <Button
+                            variant="ghost" size="icon"
+                            className="h-6 w-6 shrink-0"
+                            onClick={() => copyToClipboard(publicJson.credentialHash, 'Credential hash')}
+                          >
+                            <Copy className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Quick actions */}
+              <Card>
+                <CardHeader><CardTitle className="text-base">Actions</CardTitle></CardHeader>
+                <CardContent>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      variant="outline"
+                      onClick={() => window.open(`https://sepolia.etherscan.io/tx/${onChainProofResult.txHash}`, '_blank')}
+                    >
+                      <ExternalLink className="h-4 w-4 mr-2" />
+                      View on Etherscan
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => copyToClipboard(onChainProofResult.txHash, 'Transaction hash')}
+                    >
+                      <Copy className="h-4 w-4 mr-2" />
+                      Copy Tx Hash
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={downloadVerificationReport}
+                    >
+                      <Download className="h-4 w-4 mr-2" />
+                      Download Full Report
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
           ) : (
             <Card>
               <CardHeader>
-                <CardTitle>NFT Not Available</CardTitle>
+                <CardTitle>On-Chain Proof Not Yet Stored</CardTitle>
                 <CardDescription>
-                  Complete all verification steps to mint your soulbound KYC NFT
+                  Complete ZK proof generation to automatically store your proof on Sepolia.
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <Alert>
                   <AlertCircle className="h-4 w-4" />
                   <AlertDescription>
-                    Your KYC verification NFT will be automatically generated once all verification steps are completed.
+                    After generating your ZK proof, it will be stored on the Ethereum Sepolia testnet. The transaction hash and block number will appear here once confirmed.
                   </AlertDescription>
                 </Alert>
               </CardContent>
